@@ -1,15 +1,14 @@
 const { useState, useEffect, useRef } = React;
 
-// ============ GEMINI API CONFIG ============
-const GEMINI_API_KEY = window.RESQFLOW_CONFIG?.GEMINI_API_KEY || "";
-const GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent";
-const HAS_GEMINI_API_KEY = GEMINI_API_KEY && GEMINI_API_KEY !== "";
+// ============ GROQ API CONFIG ============
+const GROQ_API_KEY = window.RESQFLOW_CONFIG?.GROQ_API_KEY || "";
+const GROQ_CHAT_URL = "https://api.groq.com/openai/v1/chat/completions";
+const GROQ_AUDIO_URL = "https://api.groq.com/openai/v1/audio/transcriptions";
+const HAS_GROQ_API_KEY = GROQ_API_KEY && GROQ_API_KEY !== "";
 
 // ============ REQUEST THROTTLING CONFIG ============
-let lastGeminiRequestTime = 0;
-const MIN_REQUEST_INTERVAL = 2000; // Min 2 seconds between requests (increased from 1s)
-let geminiRequestQueue = [];
-let isProcessingQueue = false;
+let lastGroqRequestTime = 0;
+const MIN_REQUEST_INTERVAL = 2000; // Min 2 seconds between requests
 
 // ============ WEATHER DATA API CONFIG ============
 // Using Open-Meteo (free, no API key required)
@@ -33,7 +32,7 @@ const IMD_CAP_API = "https://cap-sources.s3.amazonaws.com/in-imd-en/rss.xml";
 const AQI_API_URL = "https://api.open-meteo.com/v1/air-quality";
 const WAQI_API_DEMO = "https://api.waqi.info/feed/"; // Requires API key for production
 
-const SYSTEM_PROMPT = `You are ResQFlow, an expert multilingual disaster response & emergency management AI assistant. You are deployed in India to help citizens during natural disasters and emergencies. You're powered by Google's Gemini.
+const SYSTEM_PROMPT = `You are ResQFlow, an expert multilingual disaster response & emergency management AI assistant. You are deployed in India to help citizens during natural disasters and emergencies. You're powered by Groq.
 
 CORE RESPONSIBILITIES:
 • Provide immediate emergency guidance for floods, earthquakes, fires, cyclones, landslides
@@ -358,9 +357,9 @@ function getDemoResponse(userMessage, selectedLang = "EN") {
   return languageResponses[intent] || languageResponses.default;
 }
 
-async function callGeminiAPI(userMessage, conversationHistory, selectedLang, onAuthFailed) {
+async function callGroqAPI(userMessage, conversationHistory, selectedLang, onAuthFailed) {
   try {
-    if (!HAS_GEMINI_API_KEY) {
+    if (!HAS_GROQ_API_KEY) {
       console.warn("API Key not configured, using demo mode");
       if (onAuthFailed) onAuthFailed();
       return getDemoResponse(userMessage, selectedLang);
@@ -368,7 +367,7 @@ async function callGeminiAPI(userMessage, conversationHistory, selectedLang, onA
 
     // ========== THROTTLE REQUESTS ==========
     const now = Date.now();
-    const timeSinceLastRequest = now - lastGeminiRequestTime;
+    const timeSinceLastRequest = now - lastGroqRequestTime;
 
     if (timeSinceLastRequest < MIN_REQUEST_INTERVAL) {
       const waitTime = MIN_REQUEST_INTERVAL - timeSinceLastRequest;
@@ -376,32 +375,34 @@ async function callGeminiAPI(userMessage, conversationHistory, selectedLang, onA
       await new Promise(resolve => setTimeout(resolve, waitTime));
     }
 
-    lastGeminiRequestTime = Date.now();
+    lastGroqRequestTime = Date.now();
+
+    const requestMessages = [
+      { role: "system", content: SYSTEM_PROMPT },
+      ...conversationHistory
+        .filter(m => m.role && m.text && m.role !== "system")
+        .map(m => ({
+          role: m.role === "bot" ? "assistant" : "user",
+          content: m.text
+        })),
+      { role: "user", content: userMessage }
+    ];
 
     const requestBody = {
-      contents: [
-        ...conversationHistory
-          .filter(m => m.role && m.text && m.role !== "system")
-          .map(m => ({
-            role: m.role === "bot" ? "model" : "user",
-            parts: [{ text: m.text }]
-          })),
-        { role: "user", parts: [{ text: userMessage }] }
-      ],
-      systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
-      generationConfig: {
-        temperature: 0.7,
-        maxOutputTokens: 1000,
-        topP: 0.9
-      }
+      model: "llama-3.3-70b-versatile",
+      messages: requestMessages,
+      temperature: 0.7,
+      max_tokens: 1000,
+      top_p: 0.9
     };
 
-    console.log("📤 Sending to Gemini API:", { messageCount: requestBody.contents.length });
+    console.log("📤 Sending to Groq API:", { messageCount: requestBody.messages.length });
 
-    const response = await fetch(`${GEMINI_API_URL}?key=${GEMINI_API_KEY}`, {
+    const response = await fetch(GROQ_CHAT_URL, {
       method: "POST",
       headers: {
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${GROQ_API_KEY}`
       },
       body: JSON.stringify(requestBody)
     });
@@ -420,15 +421,15 @@ async function callGeminiAPI(userMessage, conversationHistory, selectedLang, onA
       console.error("❌ API Error:", { status: response.status, message: errorMessage });
 
       if (response.status === 401 || response.status === 403) {
-        console.warn("⚠️ Gemini API key invalid/expired — falling back to demo mode");
+        console.warn("⚠️ Groq API key invalid/expired — falling back to demo mode");
         if (onAuthFailed) onAuthFailed();
         return getDemoResponse(userMessage, selectedLang);
       } else if (response.status === 429) {
-        return "⏱️ **RATE LIMIT EXCEEDED** (Too many requests)\n\n**Free Tier Limit**: 15 requests per minute\n\n**Solutions:**\n1. ✅ **Wait 1 minute** before sending next message\n2. 🔄 **Pro Tip**: Don't send multiple messages rapidly";
+        return "⏱️ **RATE LIMIT EXCEEDED** (Too many requests)\n\n**Solutions:**\n1. ✅ **Wait 1 minute** before sending next message\n2. 🔄 **Pro Tip**: Don't send multiple messages rapidly";
       } else if (response.status === 400) {
         return `❌ **BAD REQUEST**: ${errorMessage}\n\n• Check your API key is correct\n• Try a shorter message`;
       } else if (response.status >= 500) {
-        console.warn("Gemini service unavailable, using demo response until API recovers");
+        console.warn("Groq service unavailable, using demo response until API recovers");
         return getDemoResponse(userMessage, selectedLang);
       } else {
         return `❌ **API Error (${response.status})**: ${errorMessage}\n\n🔍 Check browser console (F12) for details.`;
@@ -436,17 +437,17 @@ async function callGeminiAPI(userMessage, conversationHistory, selectedLang, onA
     }
 
     const data = await response.json();
-    console.log("✅ Gemini response received");
+    console.log("✅ Groq response received");
 
-    if (!data.candidates || data.candidates.length === 0) {
-      console.error("No candidates in response:", data);
+    if (!data.choices || data.choices.length === 0) {
+      console.error("No choices in response:", data);
       return "❓ Empty response from API. This might be due to content filters. Try asking a different question.";
     }
 
-    const aiResponse = data.candidates[0].content?.parts?.[0]?.text;
+    const aiResponse = data.choices[0].message?.content;
 
     if (!aiResponse) {
-      console.error("Could not extract text from response:", data.candidates[0]);
+      console.error("Could not extract text from response:", data.choices[0]);
       return "❓ Could not extract response text. Please try again.";
     }
 
@@ -459,7 +460,7 @@ async function callGeminiAPI(userMessage, conversationHistory, selectedLang, onA
       return "🔴 **NETWORK ERROR**: Check your internet connection.\n\n• Verify you're connected to the internet\n• Try disabling VPN if using one\n• Open console (F12) for detailed error";
     }
 
-    return `🔴 **Error**: ${error.message}\n\n**Troubleshooting:**\n• Check internet connection\n• Verify Gemini API key (should start with AIzaSy)\n• Open console (F12) for details\n• Try reloading the page`;
+    return `🔴 **Error**: ${error.message}\n\n**Troubleshooting:**\n• Check internet connection\n• Verify Groq API key (should start with gsk_)\n• Open console (F12) for details\n• Try reloading the page`;
   }
 }
 
@@ -751,7 +752,7 @@ function ResQFlow() {
     const loadLiveData = async () => {
       try {
         console.log("⏳ Loading live data...");
-        // DISABLED: These API calls consume Gemini quota!
+        // DISABLED: These API calls consume Groq quota!
         // Only load on manual request to preserve rate limit
         // const [weatherList, aqiList, disasterData] = await Promise.all([
         //   fetchMultipleWeatherData(),
@@ -826,7 +827,7 @@ function ResQFlow() {
 
     try {
       console.log("📨 Sending message with language:", lang);
-      const botResponseText = await callGeminiAPI(
+      const botResponseText = await callGroqAPI(
         userMsg.text,
         messages,
         lang,
@@ -893,42 +894,39 @@ function ResQFlow() {
     setDetected(true);
 
     try {
-      const dataUrl = await readFileAsDataUrl(audioBlob);
-      const base64Audio = dataUrl.split(',')[1];
+      const formData = new FormData();
+      formData.append("file", audioBlob, "audio.webm");
+      formData.append("model", "whisper-large-v3-turbo");
+      formData.append("response_format", "json");
 
-      const transcriptionPayload = {
-        contents: [
-          {
-            role: "user",
-            parts: [
-              { text: "Transcribe this audio and respond in " + lang + " language. Then answer the question if there is one." },
-              {
-                inlineData: {
-                  mimeType: audioBlob.type || "audio/webm",
-                  data: base64Audio
-                }
-              }
-            ]
-          }
-        ],
-        systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
-        generationConfig: { temperature: 0.7, maxOutputTokens: 1000 }
-      };
-
-      const response = await fetch(`${GEMINI_API_URL}?key=${GEMINI_API_KEY}`, {
+      const transResponse = await fetch(GROQ_AUDIO_URL, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(transcriptionPayload)
+        headers: {
+          "Authorization": `Bearer ${GROQ_API_KEY}`
+        },
+        body: formData
       });
 
-      if (response.ok) {
-        const data = await response.json();
-        const botResp = data.candidates?.[0]?.content?.parts?.[0]?.text;
-        setMessages(m => [...m, { role: "bot", text: botResp || "❓ Could not process audio", time: "just now" }]);
-      } else {
-        const err = await response.json();
-        setMessages(m => [...m, { role: "bot", text: `❌ Error: ${err.error?.message || "Audio processing failed"}`, time: "just now" }]);
+      if (!transResponse.ok) {
+        const err = await transResponse.json();
+        throw new Error(err.error?.message || "Audio transcription failed");
       }
+
+      const transData = await transResponse.json();
+      const transcribedText = transData.text;
+
+      // Update the user's message bubble with the transcribed text
+      setMessages(m => {
+        const copy = [...m];
+        if (copy.length > 0 && copy[copy.length - 1].role === "user") {
+          copy[copy.length - 1].text = `🎙 [Audio]: "${transcribedText}"`;
+        }
+        return copy;
+      });
+
+      // Now call callGroqAPI with the transcribed text
+      const botResp = await callGroqAPI(transcribedText, messages, lang, () => setApiAuthFailed(true));
+      setMessages(m => [...m, { role: "bot", text: botResp || "❓ Could not process audio", time: "just now" }]);
     } catch (error) {
       console.error("Audio send error:", error);
       setMessages(m => [...m, { role: "bot", text: `🔴 Error: ${error.message}`, time: "just now" }]);
@@ -943,8 +941,13 @@ function ResQFlow() {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    if (!file.type.startsWith("image/") && !file.type.startsWith("video/")) {
-      alert("⚠️ Please select an image or video file");
+    if (file.type.startsWith("video/")) {
+      alert("⚠️ Groq Vision currently only supports images (PNG, JPEG, WEBP, GIF). Video analysis is not supported on Groq.");
+      return;
+    }
+
+    if (!file.type.startsWith("image/")) {
+      alert("⚠️ Please select an image file");
       return;
     }
 
@@ -958,14 +961,19 @@ function ResQFlow() {
 
   const sendImageMessage = async (file = selectedImage) => {
     if (!file) {
-      alert("Please select an image or video first");
+      alert("Please select an image first");
+      return;
+    }
+
+    if (file.type.startsWith("video/")) {
+      alert("⚠️ Groq Vision currently only supports images (PNG, JPEG, WEBP, GIF). Video analysis is not supported on Groq.");
       return;
     }
 
     setLoading(true);
     setDetected(true);
     const fileName = file.name;
-    setMessages(m => [...m, { role: "user", text: `📷 [Image/Video: ${fileName}]\n\n🔍 Analyzing with Gemini Vision...`, time: "just now" }]);
+    setMessages(m => [...m, { role: "user", text: `📷 [Image: ${fileName}]\n\n🔍 Analyzing with Llama Vision...`, time: "just now" }]);
 
     try {
       const dataUrl = await readFileAsDataUrl(file);
@@ -973,12 +981,18 @@ function ResQFlow() {
       const mimeType = file.type;
 
       const visionPayload = {
-        contents: [
+        model: "llama-3.2-11b-vision-preview",
+        messages: [
+          {
+            role: "system",
+            content: SYSTEM_PROMPT
+          },
           {
             role: "user",
-            parts: [
+            content: [
               {
-                text: `You are a disaster response AI. Analyze this image/video for:
+                type: "text",
+                text: `You are a disaster response AI. Analyze this image for:
 
 1. Disaster type (flood, fire, earthquake damage, cyclone, landslide, etc.)
 2. Severity level (low/medium/high/critical)
@@ -990,39 +1004,42 @@ function ResQFlow() {
 Respond in ${lang} language. Be specific and actionable.`
               },
               {
-                inlineData: {
-                  mimeType: mimeType,
-                  data: base64Image
+                type: "image_url",
+                image_url: {
+                  url: `data:${mimeType};base64,${base64Image}`
                 }
               }
             ]
           }
         ],
-        systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
-        generationConfig: { temperature: 0.7, maxOutputTokens: 1500 }
+        temperature: 0.7,
+        max_tokens: 1500
       };
 
-      const response = await fetch(`${GEMINI_API_URL}?key=${GEMINI_API_KEY}`, {
+      const response = await fetch(GROQ_CHAT_URL, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${GROQ_API_KEY}`
+        },
         body: JSON.stringify(visionPayload)
       });
 
       if (response.ok) {
         const data = await response.json();
-        const visionResp = data.candidates?.[0]?.content?.parts?.[0]?.text;
+        const visionResp = data.choices?.[0]?.message?.content;
         setMessages(m => [...m, { role: "bot", text: visionResp || "❓ Could not analyze image", time: "just now" }]);
-        setDetectionResult({ summary: visionResp || "Unable to interpret image content.", confidence: "N/A", model: "Gemini Vision" });
+        setDetectionResult({ summary: visionResp || "Unable to interpret image content.", confidence: "N/A", model: "Llama 3.2 Vision via Groq" });
       } else {
         const err = await response.json();
         const errorText = err.error?.message || "Image analysis failed";
         setMessages(m => [...m, { role: "bot", text: `❌ Error: ${errorText}`, time: "just now" }]);
-        setDetectionResult({ summary: errorText, confidence: "N/A", model: "Gemini Vision" });
+        setDetectionResult({ summary: errorText, confidence: "N/A", model: "Llama 3.2 Vision via Groq" });
       }
     } catch (error) {
       console.error("Image send error:", error);
       setMessages(m => [...m, { role: "bot", text: `🔴 Error: ${error.message}`, time: "just now" }]);
-      setDetectionResult({ summary: error.message, confidence: "N/A", model: "Gemini Vision" });
+      setDetectionResult({ summary: error.message, confidence: "N/A", model: "Llama 3.2 Vision via Groq" });
     } finally {
       setLoading(false);
       setDetected(false);
@@ -1067,9 +1084,9 @@ Respond in ${lang} language. Be specific and actionable.`
             </div>
             <div className="topbar-right">
               <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                <div className="status-dot" style={{ background: (HAS_GEMINI_API_KEY && !apiAuthFailed) ? "#00e5a0" : "#ffcc00" }} />
-                <span className="status-text" style={{ color: (HAS_GEMINI_API_KEY && !apiAuthFailed) ? "#00e5a0" : "#ffcc00" }}>
-                  {(HAS_GEMINI_API_KEY && !apiAuthFailed) ? "LIVE MODE (Gemini API)" : "DEMO MODE"}
+                <div className="status-dot" style={{ background: (HAS_GROQ_API_KEY && !apiAuthFailed) ? "#00e5a0" : "#ffcc00" }} />
+                <span className="status-text" style={{ color: (HAS_GROQ_API_KEY && !apiAuthFailed) ? "#00e5a0" : "#ffcc00" }}>
+                  {(HAS_GROQ_API_KEY && !apiAuthFailed) ? "LIVE MODE (Groq API)" : "DEMO MODE"}
                 </span>
               </div>
               <div className={`alert-level ${alertList.some(a => a.type === "critical") ? "high" : "med"}`}>
@@ -1214,14 +1231,14 @@ Respond in ${lang} language. Be specific and actionable.`
                   <div>
                     <div style={{ fontFamily: "var(--head)", fontWeight: 700, fontSize: 15, color: "#fff" }}>ResQFlow Multilingual Assistant</div>
                     <div style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--dim)" }}>
-                      {HAS_GEMINI_API_KEY ? "✅ Live Gemini API Connected" : "⚠️ DEMO MODE - Configure Gemini API below"}
+                      {HAS_GROQ_API_KEY ? "✅ Live Groq API Connected" : "⚠️ DEMO MODE - Configure Groq API below"}
                     </div>
                   </div>
                   <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
-                    {!HAS_GEMINI_API_KEY && (
-                      <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer"
+                    {!HAS_GROQ_API_KEY && (
+                      <a href="https://console.groq.com/keys" target="_blank" rel="noopener noreferrer"
                         style={{ fontSize: 10, color: "#ffcc00", textDecoration: "underline", cursor: "pointer", padding: "4px 8px" }}>
-                        🔑 Get Gemini Key
+                        🔑 Get Groq Key
                       </a>
                     )}
                     {["EN", "HI", "TA", "BN", "TE"].map(l => (
@@ -1352,7 +1369,7 @@ Respond in ${lang} language. Be specific and actionable.`
                             fontWeight: "bold"
                           }}
                         >
-                          {loading ? "🔍 Analyzing..." : "🚀 Analyze with Gemini Vision"}
+                          {loading ? "🔍 Analyzing..." : "🚀 Analyze with Llama Vision"}
                         </button>
                       )}
                       <div style={{ fontSize: 10, color: "var(--info)", marginTop: 8 }}>
