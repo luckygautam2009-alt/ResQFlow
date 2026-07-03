@@ -981,7 +981,7 @@ function ResQFlow() {
       const mimeType = file.type;
 
       const visionPayload = {
-        model: "llama-3.2-11b-vision-preview",
+        model: "meta-llama/llama-4-scout-17b-16e-instruct",
         messages: [
           {
             role: "system",
@@ -1029,17 +1029,17 @@ Respond in ${lang} language. Be specific and actionable.`
         const data = await response.json();
         const visionResp = data.choices?.[0]?.message?.content;
         setMessages(m => [...m, { role: "bot", text: visionResp || "❓ Could not analyze image", time: "just now" }]);
-        setDetectionResult({ summary: visionResp || "Unable to interpret image content.", confidence: "N/A", model: "Llama 3.2 Vision via Groq" });
+        setDetectionResult({ summary: visionResp || "Unable to interpret image content.", confidence: "N/A", model: "Llama 4 Vision via Groq" });
       } else {
         const err = await response.json();
         const errorText = err.error?.message || "Image analysis failed";
         setMessages(m => [...m, { role: "bot", text: `❌ Error: ${errorText}`, time: "just now" }]);
-        setDetectionResult({ summary: errorText, confidence: "N/A", model: "Llama 3.2 Vision via Groq" });
+        setDetectionResult({ summary: errorText, confidence: "N/A", model: "Llama 4 Vision via Groq" });
       }
     } catch (error) {
       console.error("Image send error:", error);
       setMessages(m => [...m, { role: "bot", text: `🔴 Error: ${error.message}`, time: "just now" }]);
-      setDetectionResult({ summary: error.message, confidence: "N/A", model: "Llama 3.2 Vision via Groq" });
+      setDetectionResult({ summary: error.message, confidence: "N/A", model: "Llama 4 Vision via Groq" });
     } finally {
       setLoading(false);
       setDetected(false);
